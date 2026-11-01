@@ -1,0 +1,8 @@
+# duck ui from https://github.com/caioricciuti/duck-ui
+services:
+  duck-ui:
+    image: ghcr.io/caioricciuti/duck-ui:latest
+    container_name: duck-ui
+    ports:
+      - "5522:5522"
+    restart: unless-stopped
