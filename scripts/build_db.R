@@ -1,20 +1,37 @@
-# Build hints.duckdb (long "responses" design) from the HINTS 4 Stata files.
+# Build duckdb/hints.duckdb (long "responses" design) from the HINTS 4 Stata files.
 # Run from the project root:  Rscript scripts/build_db.R
 suppressMessages({library(haven); library(dplyr); library(purrr); library(tibble)
                   library(tidyr); library(DBI); library(duckdb)})
 
-db_path    <- "hints.duckdb"
+db_path    <- file.path("duckdb", "hints.duckdb")
 schema_dir <- "schema"
 dir.create(schema_dir, showWarnings = FALSE)
 
 # ---- 1. Read files (labels are Latin-1 encoded) -----------------------------
 files <- list.files("stata_data", pattern = "\\.dta$", full.names = TRUE)
-names(files) <- paste0("cycle", sub(".*cycle_?(\\d).*", "\\1", basename(files)))
+# Cycle id = survey + cycle, e.g. hints4_c3, hints5_c1; single-cycle files (hints6, hints7) -> hints6
+survey <- sub("^(hints\\d+).*", "\\1", basename(files))
+cyc_no <- ifelse(grepl("cycle", basename(files)),
+                 paste0("_c", sub(".*cycle_?(\\d).*", "\\1", basename(files))), "")
+names(files) <- paste0(survey, cyc_no)
+stopifnot(!anyDuplicated(names(files)))
 files <- files[order(names(files))]
 dfs <- map(files, read_dta, encoding = "latin1")
 dfs <- map(dfs, ~ { names(.x) <- tolower(names(.x)); .x })
+# HINTS 5+ have no personid (hhid is unique per row) and some cycles lack formtype
+dfs <- map(dfs, function(df) {
+  if (!"personid" %in% names(df)) df$personid <- df$hhid
+  df$personid <- as.character(df$personid)
+  if (!"formtype" %in% names(df)) df$formtype <- NA_real_
+  df
+})
 
-weight_re <- "^person_finwt\\d+$"
+# Weights: person_finwtN normally; hints5_c3 has tg_all_/tg1_/tg2_/tg3_ weight sets
+weight_re <- "finwt\\d+$"
+main_wt   <- function(df) {                      # full-sample weight used in respondents
+  for (nm in c("person_finwt0", "tg_all_finwt0")) if (nm %in% names(df)) return(as.numeric(df[[nm]]))
+  rep(NA_real_, nrow(df))
+}
 core_cols <- c("personid", "hhid", "formtype")
 
 # ---- 2. Metadata ------------------------------------------------------------
@@ -55,16 +72,17 @@ cycles <- tibble(
 respondents <- imap_dfr(dfs, function(df, cyc)
   tibble(cycle = cyc, personid = df$personid, hhid = as.character(df$hhid),
          formtype = as.numeric(df$formtype),
-         person_finwt0 = as.numeric(df$person_finwt0)))
+         person_finwt0 = main_wt(df)))
 
 weights <- imap_dfr(dfs, function(df, cyc) {
   wcols <- grep(weight_re, names(df), value = TRUE)
   df |> select(personid, all_of(wcols)) |>
     mutate(across(all_of(wcols), as.numeric)) |>
     pivot_longer(-personid, names_to = "wt", values_to = "weight") |>
-    mutate(cycle = cyc, wt_index = as.integer(sub("person_finwt", "", wt))) |>
+    mutate(cycle = cyc, wt_set = sub("_?finwt\\d+$", "", wt),
+           wt_index = as.integer(sub(".*finwt", "", wt))) |>
     filter(!is.na(weight)) |>
-    select(cycle, personid, wt_index, weight)
+    select(cycle, personid, wt_set, wt_index, weight)
 })
 
 # ---- 4. Long responses ------------------------------------------------------

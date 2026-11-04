@@ -1,3 +1,4 @@
 google_drive_data/
 stata_data/
 duckdb/
+.DS_Store
